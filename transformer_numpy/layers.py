@@ -17,10 +17,45 @@ class FeedForward:
         Returns:
             output: (batch_size, seq_len, d_model) output embeddings, dtype=float32.
         """
-        hidden = x @ self.W1 + self.b1  # (batch_size, seq_len, d_model) x (d_model, d_ff) + (d_ff,) = (bs, sl, dff)
-        hidden = np.maximum(0, hidden)  # ReLU activation
-        output = hidden @ self.W2 + self.b2  # (bs, sl, dff) x (dff, dm) + (dm,) = (bs, sl, dm)
-        return output
+        self.input_x = x  # save x (and intermediate steps) for the backward pass
+        self.hidden = x @ self.W1 + self.b1  # (bs, sl, dm) x (dm, dff) + (dff,) = (bs, sl, dff)
+        self.activation = np.maximum(0, self.hidden)  # ReLU activation
+        self.output = self.activation @ self.W2 + self.b2  # (bs, sl, dff) x (dff, dm) + (dm,) = (bs, sl, dm)
+        return self.output
+
+    def backward(self, dout: np.ndarray) -> np.ndarray:
+        """Backpropagates the gradient through the Feed-Forward network.
+        Args:
+            dout: (batch_size, seq_len, d_model) gradient of the loss w.r.t. the output of the FFN, dtype=float32.
+
+        Returns:
+            grad_input: (batch_size, seq_len, d_model) gradient of the loss w.r.t. the FFN input (used in
+                        residual connection), dtype=float32
+
+        Notes:
+            This method also computes and stores the following gradients for the optimizer step:
+                - grad_Wn: ∂L/∂Wn, shape (d_ff, d_model)
+                - grad_bn: ∂L/∂bn, shape (d_model,)
+            Where n = 1, 2 corresponds to the linear layers in the FFN.
+        """
+        batch_size, seq_len, d_model = dout.shape
+        _, _, d_ff = self.hidden.shape
+        # Backpropagate through second linear layer. Flatten batch and sequence dimensions for correct broadcasting.
+        dout_flat = dout.reshape((batch_size * seq_len, d_model))                # (flat, dm)
+        activation_flat = self.activation.reshape((batch_size * seq_len, d_ff))  # (flat, dff)
+        self.grad_W2 = activation_flat.T @ dout_flat                             # (dff, dm)
+        self.grad_b2 = np.sum(dout, axis=(0, 1))  # (dm,)
+        grad_activation = dout @ self.W2.T   # (bs, sl, dff)  gradient w.r.t. ReLU activation output
+        # Backpropagate through ReLU.
+        grad_hidden = grad_activation * (self.hidden > 0)  # (bs, sl, dff)
+        # Backpropagate through the first linear layer. Flatten dimensions again.
+        grad_hidden_flat = grad_hidden.reshape((batch_size * seq_len, d_ff))
+        input_x_flat = self.input_x.reshape((batch_size * seq_len, d_model))
+        self.grad_W1 = input_x_flat.T @ grad_hidden_flat   # (dm, dff)
+        self.grad_b1 = np.sum(grad_hidden, axis=(0, 1))  # (dff,)
+        # Gradient w.r.t. FFN input.
+        grad_input = grad_hidden @ self.W1.T  # (bs, sl, dm)
+        return grad_input
 
 
 class LayerNorm:
@@ -37,10 +72,40 @@ class LayerNorm:
         Returns:
             x_norm: (batch_size, seq_len, d_model) normalized, scaled and shifted embeddings.
         """
-        mean = np.mean(x, axis=-1, keepdims=True)  # (bs, sl, 1)
-        var = np.var(x, axis=-1, keepdims=True)  # (bs, sl, 1)
-        x_norm = (self.gamma * (x - mean) / np.sqrt(var + self.eps)) + self.beta
-        return x_norm
+        self.mean = np.mean(x, axis=-1, keepdims=True)  # (bs, sl, 1)
+        self.var = np.var(x, axis=-1, keepdims=True)  # (bs, sl, 1)
+        self.std = np.sqrt(self.var + self.eps)
+        self.x_hat = (x - self.mean) / self.std
+        self.x_norm = self.gamma * self.x_hat + self.beta
+        return self.x_norm
+
+    def backward(self, dout: np.ndarray) -> np.ndarray:
+        """Backpropagates the gradient through the Layer Normalization layer.
+
+        Args:
+            dout: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t. LayerNorm output.
+
+        Returns:
+            grad_input: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t input x.
+
+        Notes:
+            This method also computes and stores the following gradients for the optimizer step:
+                - grad_gamma: ∂L/∂γ, shape (1, 1, d_model)
+                - grad_beta: ∂L/∂β, shape (1, 1, d_model)
+        """
+        batch_size, seq_len, d_model = dout.shape
+        self.grad_gamma = np.sum(dout * self.x_hat, axis=(0, 1), keepdims=True)  # (1, 1, dm)
+        self.grad_beta = np.sum(dout, axis=(0, 1), keepdims=True)  # (1, 1, dm)
+        # Backpropagate into x.
+        dx_hat = dout * self.gamma  # (bs, sl, dm)
+        sum_dxhat = np.sum(dx_hat, axis=-1, keepdims=True)  # (bs, sl, 1)
+        sum_dxhat_xhat = np.sum(dx_hat * self.x_hat, axis=-1, keepdims=True)  # (bs, sl, 1)
+
+        grad_input = (
+                (dx_hat - sum_dxhat / d_model - self.x_hat * sum_dxhat_xhat / d_model)
+                / self.std
+        )
+        return grad_input
 
 
 class PositionalEncoding:

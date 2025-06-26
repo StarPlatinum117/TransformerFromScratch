@@ -62,12 +62,12 @@ def calculate_cross_entropy_loss(
     cse_loss = -np.log(gt_probs)  # (batch_size, tgt_seq_len)
     cse_loss = float(np.mean(cse_loss))
 
-    # Compute gradients w.r.t. logits. The result of (partial) dL/dlogits is well known (see comment below).
+    # Compute gradients w.r.t. logits. The result of ∂L/∂logits is well known (see comment below).
     batch_size, seq_len = y_true.shape
     grad_logits = probs.copy()
     batch_indices = np.arange(batch_size)[:, None]  # (batch_size, 1)
     seq_indices = np.arange(seq_len)  # (seq_len,)
-    # dL/dlogits = Subtract 1 from the predicted probability of the correct class.
+    # ∂L/∂logits = Subtract 1 from the predicted probability of the correct class.
     grad_logits[batch_indices, seq_indices, y_true] -= 1  # (batch_size, seq_len, vocab_size)
     grad_logits /= (batch_size * seq_len)  # normalize over all tokens
 

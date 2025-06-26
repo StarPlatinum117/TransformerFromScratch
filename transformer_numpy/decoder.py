@@ -69,26 +69,51 @@ class TransformerDecoder:
         return probs
 
     def backward(self, dout: np.ndarray) -> np.ndarray:
-        """Computes the backward flow through the Decoder
+        """Backpropagates the gradient through the final linear projection layer and the decoder stack.
         Args:
-            dout: (batch_size, tgt_seq_len, vocab_size) gradient of loss w.r.t. logits, dype=float32.
+            dout: (batch_size, tgt_seq_len, vocab_size) gradient of loss w.r.t. logits, dtype=float32
         Returns:
-            grad_encoder_output: add text, dtype=float32.
+            grad_encoder_output: (batch_size, tgt_seq_len, d_model) gradient to pass into the
+                                 encoder stack, dtype=float32.
+        Notes:
+            The gradients grad_Wo, grad_bo, and grad_output come from standard matrix calculus:
+                - logits = output @ Wo + bo.
+                - ∂L/∂Wo = output.T @ ∂L/∂logits.
+                - ∂L/∂bo = sum over batch and sequence positions of ∂L/∂logits.
+                - ∂L/∂output = ∂L/∂logits @ Wo.T.
+
+            For more details on these derivations, see:
+                - Stanford CS231n notes on backprop through fully connected layers
+                  https://cs231n.github.io/optimization-2/#fc
+                - "Matrix Calculus for Deep Learning" by Terence Parr and Jeremy Howard
+                  https://explained.ai/matrix-calculus/index.html
+
+            This method also stores the following gradients for the optimizer step:
+                - grad_Wo: shape (d_model, vocab_size)
+                - grad_bo: shape (vocab_size,)
         """
-        # Backpropagate through final linear projection layer: logits = output @ Wo + bo.
-        # Compute gradient w.r.t. Wo: dL/dWo = dL/dlogits x dlogits/dWo = dout @ output (bs,tgt_sl,vs)x(bs,tgt_sl,dm)
-        # Reshape for matrix multiplication.
+        # Backpropagate through final linear projection layer. First, flatten batch and seq_len dimensions.
         batch_size, seq_len, vocab_size = dout.shape
-        dout_flat = dout.reshape(batch_size * seq_len, vocab_size)  # (bs*sl, vs)
-        output_flat = self.output.reshape(batch_size * seq_len, self.d_model)  # (bs*sl, dm)
-        grad_Wo = dout.T @ self.output  # (vs, bs*sl) @ (bs*sl, dm) = (vs, dm)
-        grad_bo = ...
-        grad_output = ...  # decoder's output before projection.
-        # Backpropagate through all decoder blocks.
+        dout_flat = dout.reshape(batch_size * seq_len, vocab_size)  # (bs*sl, vs) = (flat, vs)
+        output_flat = self.output.reshape(batch_size * seq_len, self.d_model)  # (bs*sl, dm) = (flat, dm)
+        # Compute gradient w.r.t. Wo.
+        self.grad_Wo = output_flat.T @ dout_flat  # (dm, flat) x (flat, vs) = (dm, vs)
+        # Compute gradient w.r.t. bo.
+        self.grad_bo = np.sum(dout, axis=(0, 1))  # (vocab_size,)
+        # Compute gradient w.r.t. decoder stack's output before projection. This is sent into the decoder stack.
+        grad_output = dout @ self.Wo.T  # (bs, sl, vs) x (vs, dm) = (bs, sl, dm)
+
+        # Backpropagate through decoder blocks.
+        # Accumulate gradient to encoder output.
+        grad_encoder_output = np.zeros((batch_size, seq_len, self.d_model))  # this is sent into the encoder stack.
         for decoder in reversed(self.decoders):
-            decoder.backward(grad_Wo, grad_bo)
-        # Backpropagate through input embeddings.
-        
+            grad_output, grad_enc = decoder.backward(grad_output)
+            grad_encoder_output += grad_enc  # (bs, sl, dm)
+        # No backpropagation needed for positional encoding since it is fixed (sinusoidal), not learnable.
+
+        # Return grad_encoder_output to pass into encoder stack.
+        return grad_encoder_output
+
 
 class DecoderBlock:
     def __init__(self, num_heads: int, d_model, d_ff: int):
@@ -123,15 +148,63 @@ class DecoderBlock:
             output: (bs, tgt_sl, dm) decoded embeddings, dtype=float32.
         """
         # Apply masked multi-head attention. Attending to future tokens is not allowed.
-        output = self.masked_multihead_attention.self_attention(input_embeddings=x, mask=tgt_mask)
+        self_attn_output = self.masked_multihead_attention.self_attention(input_embeddings=x, mask=tgt_mask)
         # Add residual and normalize.
-        output = self.layernorm1(output + x)
+        res1 = self_attn_output + x
+        out1 = self.layernorm1(res1)
         # Apply cross-attention on encoder output.
-        encoder_attn = self.cross_attention.cross_attention(x_query=x, x_key_value=encoder_output, mask=src_mask)
+        cross_attn = self.cross_attention.cross_attention(x_query=out1, x_key_value=encoder_output, mask=src_mask)
         # Add residual and normalize.
-        output = self.layernorm2(encoder_attn + output)
+        res2 = cross_attn + res1
+        out2 = self.layernorm2(res2)
         # Apply feed-forward layer.
-        hidden = self.ff(output)
+        hidden = self.ff(out2)
         # Add residual and normalize.
-        output = self.layernorm3(hidden + output)
+        res3 = hidden + res2
+        output = self.layernorm3(res3)
         return output
+
+    def backward(self, dout: np.ndarray) -> tuple[np.ndarray]:
+        """Backpropagates the gradient through the Transformer Decoder block.
+
+        Args:
+            dout: (batch_size, tgt_seq_len, d_model) gradient of loss w.r.t. decoder stack's output, dtype=float32.
+
+        Returns:
+            grad_input: (batch_size, tgt_seq_len, d_model) gradient of loss w.r.t. decoder block input x, dtype=float32.
+            grad_encoder_output: (batch_size, src_seq_len, d_model) gradient of loss w.r.t. encoder output (used as
+                                 key and value in cross-attention), dtype=float32.
+
+        Notes:
+            The gradient variable names follow the forward pass:
+                - res1 = self_attn_output + x        → grad_res1
+                - out1 = layernorm1(res1)            → grad_out1
+                - res2 = cross_attn + res1           → grad_res2
+                - out2 = layernorm2(res2)            → grad_out2
+                - res3 = hidden + res2               → grad_res3
+                - output = layernorm3(res3)          → dout
+        """
+        # Backpropagate through LayerNorm3 and residual res3 = hidden + res2.
+        grad_res3 = self.layernorm3.backward(dout)  # (bs, sl, dm)
+        grad_hidden = grad_res3  # for feed-forward
+        grad_out2 = grad_res3    # for residual path toward layernorm2
+        # Backpropagate through Feed-Forward layer.
+        grad_ff_out2 = self.ff.backward(grad_hidden)  # (bs, sl, dm)
+        grad_out2 += grad_ff_out2  # add residual gradient
+        # Backpropagate through LayerNorm2 and residual res 2 = cross_attn + res1.
+        grad_res2 = self.layernorm2.backward(grad_out2)  # (bs, sl, dm)
+        grad_cross_attn = grad_res2  # for cross-attention
+        grad_out1 = grad_res2        # for residual path toward layernorm1
+        # Backpropagate through Cross-Attention layer. Both grads have shape (bs, sl, dm).
+        grad_out1_attn, grad_encoder_output = self.cross_attention.backward(grad_cross_attn, cross_attention=True)
+        grad_out1 += grad_out1_attn  # add residual gradient
+        # Backpropagate through LayerNorm1 and residual res1 = self_attn_output + x.
+        grad_res1 = self.layernorm1.backward(grad_out1)  # (bs, sl, dm)
+        grad_self_attn = grad_res1     # toward self-attention
+        grad_input_direct = grad_res1  # residual path to x
+        # Backpropagate through Masked Self-Attention layer.
+        grad_input_attn = self.masked_multihead_attention.backward(grad_self_attn, self_attention=True)  # (bs, sl, dm)
+        # Combine residual paths into final input gradient.
+        grad_input = grad_input_direct + grad_input_attn
+        return grad_input, grad_encoder_output
+

@@ -46,11 +46,11 @@ class MultiHeadAttention:
         K = K.reshape((batch_size, k_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
         V = V.reshape((batch_size, v_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
         # Compute multi-head attention. Output: (bs, nh, sl, dk). Weights: (nh, sl, sl).
-        output, attention_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
+        attn_output, attn_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
         # Transpose and reshape back to (bs, sl, dm).
-        output = output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
+        attn_output = attn_output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
         # Final linear projection.
-        output = output @ self.Wo  # (bs, sl, dm) x (dm, dm) = (bs, sl, dm)
+        output = attn_output @ self.Wo  # (bs, sl, dm) x (dm, dm) = (bs, sl, dm)
         return output
 
     def self_attention(self, *, input_embeddings: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
