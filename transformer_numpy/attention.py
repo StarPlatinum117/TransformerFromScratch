@@ -31,6 +31,8 @@ class MultiHeadAttention:
             mask:       (batch_size, num_heads, seq_len, seq_len) True for masked positions.
         Returns:
             output: (batch_size, seq_len, d_model) unified representation of all attention heads, dtype=float32.
+        Notes:
+            The matrices QKV, the attention weights and output are saved for the backward pass.
         """
         batch_size = x_query.shape[0]
         q_len = x_query.shape[1]
@@ -45,12 +47,15 @@ class MultiHeadAttention:
         Q = Q.reshape((batch_size, q_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
         K = K.reshape((batch_size, k_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
         V = V.reshape((batch_size, v_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
-        # Compute multi-head attention. Output: (bs, nh, sl, dk). Weights: (nh, sl, sl).
-        attn_output, attn_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
-        # Transpose and reshape back to (bs, sl, dm).
-        attn_output = attn_output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
+        # Save QKV and their seq_len for backward pass.
+        self.Q, self.K, self.V = Q, K, V
+        self.q_len, self.k_len, self.v_len = q_len, k_len, v_len
+        # Compute multi-head attention. Output: (bs, nh, sl, dk). Weights: (bs, nh, sl, sl).
+        self.attn_output, self.attn_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
+        # Transpose and reshape output back to (bs, sl, dm).
+        self.attn_output = self.attn_output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
         # Final linear projection.
-        output = attn_output @ self.Wo  # (bs, sl, dm) x (dm, dm) = (bs, sl, dm)
+        output = self.attn_output @ self.Wo  # (bs, sl, dm) x (dm, dm) = (bs, sl, dm)
         return output
 
     def self_attention(self, *, input_embeddings: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
@@ -60,6 +65,44 @@ class MultiHeadAttention:
             self, *,
             x_query: np.ndarray , x_key_value: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
         return self.forward(x_query=x_query, x_key=x_key_value, x_value=x_key_value, mask=mask)
+
+    def backward(self, dout: np.ndarray, self_attention: bool) -> np.ndarray:
+        """Backpropagates the gradient through the Multi-Head Attention layer.
+
+        This method computes the gradients w.r.t. input x_query, x_key, x_value, and the weight matrices.
+        Unless specified otherwise, all gradients are of dtype=float32.
+
+        Args:
+            dout: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t. the output of the MHA layer.
+
+        Returns:
+            grad_input: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t. input x_query.
+
+        Notes:
+            This method also computes and stores the following gradients for the optimizer step:
+                - grad_Wo: ∂L/∂Wo, shape (d_model, d_model)
+        """
+        batch_size, seq_len, d_model = dout.shape
+        # Backpropagate through the final linear projection. Flatten batch and sequence dimensions for broadcasting.
+        dout_flat = dout.reshape((batch_size * seq_len, d_model))  # (flat, dm)
+        attn_output_flat = self.attn_output.reshape((batch_size * seq_len, d_model))  # (flat, dm)
+        self.grad_Wo = attn_output_flat.T @ dout_flat  # (dm, dm)
+        grad_attn_output = dout @ self.Wo.T            # (bs, sl, dm)
+        # Backpropagate through multi-head attention.
+        grad_attn_output = grad_attn_output.reshape(
+            (batch_size, self.q_len, self.num_heads, self.dk)
+        ).transpose((0, 2, 1, 3))  # (bs, nh, sl_q, dk)
+        grad_Q, grad_K, grad_V = scaled_dot_product_attention_backward(
+            queries=self.Q,
+            keys=self.K,
+            values=self.V,
+            attn_weights=self.attn_weights,
+            dout=grad_attn_output,
+        )  # each of shape (bs, nh, sl, dk)
+        # Reshape gradients back to (bs, sl, dm).
+        grad_Q_combined = grad_Q.transpose((0, 2, 1, 3)).reshape((batch_size, self.q_len, d_model))
+        grad_K_combined = grad_K.transpose((0, 2, 1, 3)).reshape((batch_size, self.k_len, d_model))
+        grad_V_combined = grad_V.transpose((0, 2, 1, 3)).reshape((batch_size, self.v_len, d_model))
 
 
 def scaled_dot_product_attention(
@@ -104,3 +147,40 @@ def scaled_dot_product_attention(
     output = attention_weights @ V  # (bs,nh,sl,sl) x (bs,nh,sl,dk) = (bs,nh,sl,dk)
 
     return output, attention_weights
+
+
+def scaled_dot_product_attention_backward(
+        *,
+        queries: np.ndarray,
+        keys: np.ndarray,
+        values: np.ndarray,
+        attn_weights: np.ndarray,
+        dout: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Backpropagates the gradient through the scaled dot-product attention.
+    All input matrices are computed during the forward pass and have dtype=float32.
+    Args:
+        queries: (bs, nh, sl_q, dk) queries matrix Q.
+        keys:    (bs, nh, sl_k, dk) keys matrix K.
+        values:  (bs, nh, sl_v, dk) values matrix V.
+        attn_weights: (bs, nh, sl_q, sl_k) self-attention weights.
+        dout:    (bs, nh, sl_q, dk) gradient of the loss w.r.t. the output of the scaled dot-product attention.
+
+    Returns:
+        grad_Q: (bs, nh, sl_q, dk)
+        grad_K: (bs, nh, sl_k, dk)
+        grad_V: (bs, nh, sl_v, dk)
+    """
+    Q, K, V = queries, keys, values
+    dk = Q.shape[-1]
+    scale = 1. / np.sqrt(dk)
+    # Backpropagate through final score-value multiplication.
+    grad_attn_weights = dout @ V.transpose((0, 1, 3, 2))  # (bs,nh,sl_q,dk) x (bs,nh,dk,sl_v) = (bs,nh,sl_q,sl_v)
+    grad_V = attn_weights.transpose((0, 1, 3, 2)) @ dout  # (bs,nh,sl_k, sl_q) x (bs,nh,sl_q,dk) = (bs,nh,sl_k,dk)
+    # Backpropagate through the softmax + scaling.
+    weighted_grad_sum = np.sum(grad_attn_weights * attn_weights, axis=-1, keepdims=True)  # (bs,nh,sl_q,1)
+    grad_scores = attn_weights * (grad_attn_weights - weighted_grad_sum)  # (bs,nh,sl_q,sl_k)
+    # Backpropagate through the scores' computation.
+    grad_Q = grad_scores @ keys * scale  # (bs, nh, sl_q, dk)
+    grad_K = grad_scores.transpose(0, 1, 3, 2) @ queries * scale  # (bs,nh,sl_k,dk)
+
+    return grad_Q, grad_K, grad_V

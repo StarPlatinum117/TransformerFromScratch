@@ -164,7 +164,7 @@ class DecoderBlock:
         output = self.layernorm3(res3)
         return output
 
-    def backward(self, dout: np.ndarray) -> tuple[np.ndarray]:
+    def backward(self, dout: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Backpropagates the gradient through the Transformer Decoder block.
 
         Args:
