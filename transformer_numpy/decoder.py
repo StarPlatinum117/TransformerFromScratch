@@ -196,7 +196,7 @@ class DecoderBlock:
         grad_cross_attn = grad_res2  # for cross-attention
         grad_out1 = grad_res2        # for residual path toward layernorm1
         # Backpropagate through Cross-Attention layer. Both grads have shape (bs, sl, dm).
-        grad_out1_attn, grad_encoder_output = self.cross_attention.backward(grad_cross_attn, cross_attention=True)
+        grad_out1_attn, grad_encoder_output = self.cross_attention.backward(grad_cross_attn, self_attention=False)
         grad_out1 += grad_out1_attn  # add residual gradient
         # Backpropagate through LayerNorm1 and residual res1 = self_attn_output + x.
         grad_res1 = self.layernorm1.backward(grad_out1)  # (bs, sl, dm)

@@ -47,15 +47,19 @@ class MultiHeadAttention:
         Q = Q.reshape((batch_size, q_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
         K = K.reshape((batch_size, k_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
         V = V.reshape((batch_size, v_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
-        # Save QKV and their seq_len for backward pass.
+
+        # Compute multi-head attention. Output: (bs, nh, sl, dk). Weights: (bs, nh, sl, sl).
+        attn_output, attn_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
+        # Transpose and reshape output back to (bs, sl, dm).
+        attn_output = attn_output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
+        # Final linear projection.
+        output = attn_output @ self.Wo  # (bs, sl, dm) x (dm, dm) = (bs, sl, dm)
+        # Save everything necessary for the backward pass
+        self.x_query, self.x_key, self.x_value = x_query, x_key, x_value
         self.Q, self.K, self.V = Q, K, V
         self.q_len, self.k_len, self.v_len = q_len, k_len, v_len
-        # Compute multi-head attention. Output: (bs, nh, sl, dk). Weights: (bs, nh, sl, sl).
-        self.attn_output, self.attn_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
-        # Transpose and reshape output back to (bs, sl, dm).
-        self.attn_output = self.attn_output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
-        # Final linear projection.
-        output = self.attn_output @ self.Wo  # (bs, sl, dm) x (dm, dm) = (bs, sl, dm)
+        self.attn_output, self.attn_weights = attn_output, attn_weights
+
         return output
 
     def self_attention(self, *, input_embeddings: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
@@ -66,7 +70,7 @@ class MultiHeadAttention:
             x_query: np.ndarray , x_key_value: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
         return self.forward(x_query=x_query, x_key=x_key_value, x_value=x_key_value, mask=mask)
 
-    def backward(self, dout: np.ndarray, self_attention: bool) -> np.ndarray:
+    def backward(self, dout: np.ndarray, self_attention: bool) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Backpropagates the gradient through the Multi-Head Attention layer.
 
         This method computes the gradients w.r.t. input x_query, x_key, x_value, and the weight matrices.
@@ -76,7 +80,11 @@ class MultiHeadAttention:
             dout: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t. the output of the MHA layer.
 
         Returns:
-            grad_input: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t. input x_query.
+            - If self_attention is True:
+                grad_input: (batch_size, seq_len, d_model)
+            - If self_attention is False (e.g. during cross-attention):
+                grad_input_query: (batch_size, seq_len, d_model)
+                grad_input_key_value: (batch_size, seq_len, d_model)
 
         Notes:
             This method also computes and stores the following gradients for the optimizer step:
@@ -99,10 +107,51 @@ class MultiHeadAttention:
             attn_weights=self.attn_weights,
             dout=grad_attn_output,
         )  # each of shape (bs, nh, sl, dk)
-        # Reshape gradients back to (bs, sl, dm).
-        grad_Q_combined = grad_Q.transpose((0, 2, 1, 3)).reshape((batch_size, self.q_len, d_model))
-        grad_K_combined = grad_K.transpose((0, 2, 1, 3)).reshape((batch_size, self.k_len, d_model))
-        grad_V_combined = grad_V.transpose((0, 2, 1, 3)).reshape((batch_size, self.v_len, d_model))
+        # Project Q, K, V gradients to input space.
+        grad_input_Q = self._project_qkv_backward(dout=grad_Q, input_x=self.x_query, W=self.W_q, grad_W_attr="grad_W_q")
+        grad_input_K = self._project_qkv_backward(dout=grad_K, input_x=self.x_key, W=self.W_k, grad_W_attr="grad_W_k")
+        grad_input_V = self._project_qkv_backward(dout=grad_V, input_x=self.x_value, W=self.W_v, grad_W_attr="grad_W_v")
+
+        if self_attention:
+            return grad_input_Q + grad_input_K + grad_input_V
+        else:
+            return grad_input_Q, grad_input_K + grad_input_V
+
+    def _project_qkv_backward(
+            self, *,
+            dout: np.ndarray,
+            input_x: np.ndarray,
+            W: np.ndarray,
+            grad_W_attr: str,
+    ) -> np.ndarray:
+        """Backpropagates through a Q/K/V projection linear layer and computes the gradient w.r.t. the input.
+    Args:
+        dout:    (batch_size, num_heads, seq_len, dk) gradient of the loss w.r.t. Q, K, or V after
+                 the attention computation.
+        input_x: (batch_size, seq_len, d_model) the input used to compute Q, K, or V during the forward pass.
+        W:       (d_model, d_model) the projection weight matrix used for Q, K, or V during the forward pass.
+        grad_W_attr: name of attribute to store grad_W (e.g. 'grad_W_q').
+
+    Returns:
+        grad_input: (batch_size, seq_len, d_model) gradient of the loss w.r.t. the input that was used to compute Q/K/V.
+
+    Notes:
+        Also computes and stores:
+            - grad_W_q / grad_W_k / grad_W_v: ∂L/∂W_{q,k,v}, shape (d_model, d_model)
+    """
+        bs, sl, dm = input_x.shape
+        _, nh, _, dk = dout.shape
+        # Flatten for projection matrix gradient.
+        grad_output_flat = dout.transpose((0, 2, 1, 3)).reshape(bs * sl, nh * dk)
+        input_flat = input_x.reshape(bs * sl, dm)
+        # Compute gradient w.r.t. W.
+        grad_W = input_flat.T @ grad_output_flat  # (dm, dm)
+        # Save it for the optimizer step.
+        setattr(self, grad_W_attr, grad_W)
+        # Backprop into input
+        grad_input = grad_output_flat @ W.T  # (flat, dm)
+        grad_input = grad_input.reshape((bs, sl, dm))
+        return grad_input
 
 
 def scaled_dot_product_attention(
