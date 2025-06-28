@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Iterator
 from typing import Optional
 
 from decoder import TransformerDecoder
@@ -64,3 +65,11 @@ class Transformer:
         grad_decoder = self.decoder.backward(dout=dout)
         # Then through encoder.
         self.encoder.backward(dout=grad_decoder)
+
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns the parameters and gradients of the Transformer model for optimization.
+        Returns:
+            generator yielding tuples of (parameter, gradient) for each parameter in the model.
+        """
+        yield from self.encoder.get_parameters_and_gradients()
+        yield from self.decoder.get_parameters_and_gradients()

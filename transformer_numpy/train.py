@@ -1,13 +1,11 @@
+import logging
 import numpy as np
 
-from typing import Optional
-
 from utils import calculate_cross_entropy_loss
-from utils import get_predicted_probability_for_gt_label
 from tokenizer import get_identity_dataset
 from transformer import Transformer
 
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 # ========================== Training settings. =======================================================================
 np.random.seed(1)
 vocab_size = 50
@@ -43,9 +41,24 @@ for epoch in range(n_epochs):
             src=src_arr, tgt=tgt_arr, src_mask=None, from_logits=from_logits
         )  # (1, tgt_seq_len, vocab_size)
         # Loss computation.
-        loss, grad_logits = calculate_cross_entropy_loss(y_pred=predictions, y_true=tgt_output, from_logits=from_logits)
+        loss, grad_logits = calculate_cross_entropy_loss(
+            y_pred=predictions, y_true=expected_output, from_logits=from_logits
+        )
         # Accumulate batch losses.
         epoch_loss += loss
+        # Zero gradients
+        for param, grad in model.get_parameters_and_gradients():
+            grad[...] = 0  # in-place zeroing
         # Back-propagation.
         model.backward(dout=grad_logits)
-        # Log epoch metrics.
+        # Optimizer step.
+        for param, grad in model.get_parameters_and_gradients():
+            param -= learning_rate * grad
+    # Intermediate output logging for sanity check.
+    if epoch % 5 == 0:
+        decoded = np.argmax(predictions[0], axis=-1)
+        logging.info(f"Input: {src}")
+        logging.info(f"Prediction: {decoded.tolist()}")
+        logging.info(f"Target: {tgt_output}")
+    # Log epoch metrics.
+    logging.info(f"Epoch {epoch+1}/{n_epochs} - Loss: {epoch_loss: .4f}")
