@@ -1,13 +1,11 @@
+import logging
 import numpy as np
 
-from typing import Optional
-
 from utils import calculate_cross_entropy_loss
-from utils import get_predicted_probability_for_gt_label
 from tokenizer import get_identity_dataset
 from transformer import Transformer
 
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 # ========================== Training settings. =======================================================================
 np.random.seed(1)
 vocab_size = 50
@@ -48,4 +46,8 @@ for epoch in range(n_epochs):
         epoch_loss += loss
         # Back-propagation.
         model.backward(dout=grad_logits)
-        # Log epoch metrics.
+        # Optimizer step.
+        for param, grad in model.get_parameters_and_gradients():
+            param -= learning_rate * grad
+    # Log epoch metrics.
+    logging.info(f"Epoch {epoch+1}/{n_epochs} - Loss: {epoch_loss: .4f}")

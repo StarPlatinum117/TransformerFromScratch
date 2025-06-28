@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Iterator
 from typing import Optional
 
 
@@ -57,6 +58,15 @@ class FeedForward:
         grad_input = grad_hidden @ self.W1.T  # (bs, sl, dm)
         return grad_input
 
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns learnable parameters and their gradients for the optimizer step."""
+        return iter([
+            (self.W1, self.grad_W1),
+            (self.b1, self.grad_b1),
+            (self.W2, self.grad_W2),
+            (self.b2, self.grad_b2),
+        ])
+
 
 class LayerNorm:
     def __init__(self, d_model: int, eps: Optional[float] = 1e-5):
@@ -106,6 +116,13 @@ class LayerNorm:
                 / self.std
         )
         return grad_input
+
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns learnable parameters and their gradients for the optimizer step."""
+        return iter([
+            (self.gamma, self.grad_gamma),
+            (self.beta, self.grad_beta),
+        ])
 
 
 class PositionalEncoding:

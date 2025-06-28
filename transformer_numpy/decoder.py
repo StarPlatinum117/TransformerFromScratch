@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Iterator
 from typing import Optional
 
 from attention import MultiHeadAttention
@@ -21,20 +22,6 @@ class TransformerDecoder:
         self.decoders = [DecoderBlock(num_heads, d_model, d_ff) for _ in range(num_layers)]
         self.Wo = np.random.randn(d_model, vocab_size).astype(np.float32)
         self.bo = np.zeros(vocab_size, dtype=np.float32)
-
-    @staticmethod
-    def _generate_self_attention_mask(seq_len: int) -> np.ndarray:
-        """Creates upper-triangular mask to avoid attending to future tokens.
-        Args:
-            seq_len: target sequence length.
-        Returns:
-            mask: (1, 1, seq_len, seq_len) True for masked positions. Includes batch and head dimensions.
-        """
-        mask = np.ones((seq_len, seq_len))
-        mask = np.triu(mask).astype(bool)
-        # Add batch and head dimensions.
-        mask = mask[np.newaxis, np.newaxis, :, :]  # (1, 1, seq_len, seq_len)
-        return mask
 
     def __call__(
             self, *,
@@ -59,10 +46,13 @@ class TransformerDecoder:
         tgt_mask = self._generate_self_attention_mask(seq_len)
         for decoder in self.decoders:
             output = decoder(x=output, encoder_output=encoder_output, tgt_mask=tgt_mask, src_mask=src_mask)
-        # Cache output for the backward step.
-        self.output = output
         # Apply final linear layer and possibly softmax.
         logits = output @ self.Wo + self.bo  # (bs, sl, dm) x (dm, vocab_size) + (vocab_size,) = (bs, sl, vs)
+
+        # Cache input and output for the backward step.
+        self.input_x = x
+        self.output = output
+
         if from_logits:
             return logits
         probs = numerically_stable_softmax(logits)
@@ -105,14 +95,52 @@ class TransformerDecoder:
 
         # Backpropagate through decoder blocks.
         # Accumulate gradient to encoder output.
+        grad_decoder_input = grad_output
         grad_encoder_output = np.zeros((batch_size, seq_len, self.d_model))  # this is sent into the encoder stack.
         for decoder in reversed(self.decoders):
-            grad_output, grad_enc = decoder.backward(grad_output)
+            grad_decoder_input, grad_enc = decoder.backward(grad_decoder_input)
             grad_encoder_output += grad_enc  # (bs, sl, dm)
+
         # No backpropagation needed for positional encoding since it is fixed (sinusoidal), not learnable.
+        # Backpropagate through token embeddings.
+        self.grad_token_embeddings = np.zeros_like(self.token_embedding, dtype=np.float32)  # gradient matrix
+        for b in range(batch_size):
+            for t in range(seq_len):
+                idx = self.input_x[b, t]  # token index for batch b, position t
+                self.grad_token_embeddings[idx] += grad_decoder_input[b, t]  # accumulate gradient for this token index
 
         # Return grad_encoder_output to pass into encoder stack.
         return grad_encoder_output
+
+    @staticmethod
+    def _generate_self_attention_mask(seq_len: int) -> np.ndarray:
+        """Creates upper-triangular mask to avoid attending to future tokens.
+        Args:
+            seq_len: target sequence length.
+        Returns:
+            mask: (1, 1, seq_len, seq_len) True for masked positions. Includes batch and head dimensions.
+        """
+        mask = np.ones((seq_len, seq_len))
+        mask = np.triu(mask).astype(bool)
+        # Add batch and head dimensions.
+        mask = mask[np.newaxis, np.newaxis, :, :]  # (1, 1, seq_len, seq_len)
+        return mask
+
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns the parameters and gradients of the Transformer Decoder for optimization.
+        Returns:
+            Iterator of tuples (parameter, gradient) for each learnable parameter in the Transformer decoder.
+        Notes:
+            Parameters and gradients of positional encodings are not yielded. They are fixed in this implementation.
+        """
+        # Yield parameters and their gradients from each decoder block.
+        for decoder in self.decoders:
+            yield from decoder.get_parameters_and_gradients()
+        # Yield token embedding parameters and their gradients.
+        yield self.token_embedding, self.grad_token_embeddings
+        # Yield final linear projection parameters and their gradients.
+        yield self.Wo, self.grad_Wo
+        yield self.bo, self.grad_bo
 
 
 class DecoderBlock:
@@ -208,3 +236,16 @@ class DecoderBlock:
         grad_input = grad_input_direct + grad_input_attn
         return grad_input, grad_encoder_output
 
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns the parameters and gradients of the Decoder block for optimization.
+        Returns:
+            Iterator of tuples (parameter, gradient) for each learnable parameter in the Decoder block.
+        """
+        # Yield parameters and their gradients from attention sub-blocks.
+        yield from self.masked_multihead_attention.get_parameters_and_gradients()
+        yield from self.cross_attention.get_parameters_and_gradients()
+        # Yield from LayerNorms.
+        for layer in [self.layernorm1, self.layernorm2, self.layernorm3]:
+            yield layer.get_parameters_and_gradients()
+        # Yield feed-forward layer parameters and their gradients.
+        yield from self.ff.get_parameters_and_gradients()

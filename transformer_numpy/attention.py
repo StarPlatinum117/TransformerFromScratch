@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Iterator
 from typing import Optional
 
 
@@ -49,7 +50,7 @@ class MultiHeadAttention:
         V = V.reshape((batch_size, v_len, self.num_heads, self.dk)).transpose((0, 2, 1, 3))
 
         # Compute multi-head attention. Output: (bs, nh, sl, dk). Weights: (bs, nh, sl, sl).
-        attn_output, attn_weights = scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
+        attn_output, attn_weights = self.scaled_dot_product_attention(queries=Q, keys=K, values=V, mask=mask)
         # Transpose and reshape output back to (bs, sl, dm).
         attn_output = attn_output.transpose((0, 2, 1, 3)).reshape((batch_size, q_len, self.d_model))
         # Final linear projection.
@@ -67,7 +68,7 @@ class MultiHeadAttention:
 
     def cross_attention(
             self, *,
-            x_query: np.ndarray , x_key_value: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
+            x_query: np.ndarray, x_key_value: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
         return self.forward(x_query=x_query, x_key=x_key_value, x_value=x_key_value, mask=mask)
 
     def backward(self, dout: np.ndarray, self_attention: bool) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
@@ -78,6 +79,7 @@ class MultiHeadAttention:
 
         Args:
             dout: (batch_size, tgt_seq_len, d_model) gradient of the loss w.r.t. the output of the MHA layer.
+            self_attention: whether the MHA layer is used for self-attention (True) or cross-attention (False).
 
         Returns:
             - If self_attention is True:
@@ -94,13 +96,13 @@ class MultiHeadAttention:
         # Backpropagate through the final linear projection. Flatten batch and sequence dimensions for broadcasting.
         dout_flat = dout.reshape((batch_size * seq_len, d_model))  # (flat, dm)
         attn_output_flat = self.attn_output.reshape((batch_size * seq_len, d_model))  # (flat, dm)
-        self.grad_Wo = attn_output_flat.T @ dout_flat  # (dm, dm)
+        self.grad_Wo = attn_output_flat.T @ dout_flat  # (dm, dm) saved for the optimizer step
         grad_attn_output = dout @ self.Wo.T            # (bs, sl, dm)
         # Backpropagate through multi-head attention.
         grad_attn_output = grad_attn_output.reshape(
             (batch_size, self.q_len, self.num_heads, self.dk)
         ).transpose((0, 2, 1, 3))  # (bs, nh, sl_q, dk)
-        grad_Q, grad_K, grad_V = scaled_dot_product_attention_backward(
+        grad_Q, grad_K, grad_V = self.scaled_dot_product_attention_backward(
             queries=self.Q,
             keys=self.K,
             values=self.V,
@@ -153,83 +155,91 @@ class MultiHeadAttention:
         grad_input = grad_input.reshape((bs, sl, dm))
         return grad_input
 
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns learnable parameters and their gradients for the optimizer step."""
+        return iter([
+            (self.W_q, self.grad_W_q),
+            (self.W_k, self.grad_W_k),
+            (self.W_v, self.grad_W_v),
+            (self.Wo, self.grad_Wo),
+        ])
 
-def scaled_dot_product_attention(
-        *,
-        queries: np.ndarray,
-        keys: np.ndarray,
-        values: np.ndarray,
-        mask: Optional = None) -> tuple[np.ndarray, np.ndarray]:
-    """Computes attention scores given Q, K, V matrices.
-    The seq_len of QKV matrices may differ based on encoder/decoder.
-    Args:
-        queries: (batch_size, num_heads, seq_len, dk) queries matrix Q, dytpe=float32.
-        keys: (batch_size, num_heads, seq_len, dk) keys matrix K, dytpe=float32.
-        values: (batch_size, num_heads, seq_len, dk) values matrix V, dytpe=float32.
-        mask: (1, 1, seq_len, seq_len) True for masked positions.
-    Returns:
-        output: (batch_size, num_heads, seq_len, dk) self-attention values, dtype=float32.
-        attention_weights: (batch_size, num_heads, seq_len, seq_len) self-attention weights.
-    """
-    Q, K, V = queries, keys, values
-    # Get the dimension of key vectors.
-    dk = K.shape[-1]
-    # Compute the attention scores using Q and V. Transpose to accommodate batch dimension.
-    scores = Q @ K.transpose((0, 1, 3, 2))  # (bs,nh,sl,dk) x (bs,nh,dk,sl) = (bs,nh,sl,sl)
-    # Scale the scores with dimension of key vectors.
-    scores /= np.sqrt(dk)
-    # Apply mask, if needed.
-    if mask is not None:
-        fully_masked_queries = mask.all(axis=-1)
-        if np.any(fully_masked_queries):
-            print("Warning: fully masked queries detected at indices:", np.where(fully_masked_queries))
-            raise Exception
-        scores = np.where(mask, -np.inf, scores)
-    # Subtract the max before taking softmax (for numerical stability). Softmax is shift invariant.
-    scores -= np.max(scores, axis=-1, keepdims=True)
-    # Apply softmax.
-    exp_scores = np.exp(scores)
-    attention_weights = (
-            exp_scores / (1e-9 + np.sum(exp_scores, axis=-1, keepdims=True))  # (bs,nh,sl,sl)x(bs,nh,sl,1)=(bs,nh,sl,sl)
-    )
-    # Multiply values by scores.
-    output = attention_weights @ V  # (bs,nh,sl,sl) x (bs,nh,sl,dk) = (bs,nh,sl,dk)
+    @staticmethod
+    def scaled_dot_product_attention(
+            queries: np.ndarray,
+            keys: np.ndarray,
+            values: np.ndarray,
+            mask: Optional = None) -> tuple[np.ndarray, np.ndarray]:
+        """Computes attention scores given Q, K, V matrices.
+        The seq_len of QKV matrices may differ based on encoder/decoder.
+        Args:
+            queries: (batch_size, num_heads, seq_len, dk) queries matrix Q, dytpe=float32.
+            keys: (batch_size, num_heads, seq_len, dk) keys matrix K, dytpe=float32.
+            values: (batch_size, num_heads, seq_len, dk) values matrix V, dytpe=float32.
+            mask: (1, 1, seq_len, seq_len) True for masked positions.
+        Returns:
+            output: (batch_size, num_heads, seq_len, dk) self-attention values, dtype=float32.
+            attention_weights: (batch_size, num_heads, seq_len, seq_len) self-attention weights.
+        """
+        Q, K, V = queries, keys, values
+        # Get the dimension of key vectors.
+        dk = K.shape[-1]
+        # Compute the attention scores using Q and V. Transpose to accommodate batch dimension.
+        scores = Q @ K.transpose((0, 1, 3, 2))  # (bs,nh,sl,dk) x (bs,nh,dk,sl) = (bs,nh,sl,sl)
+        # Scale the scores with dimension of key vectors.
+        scores /= np.sqrt(dk)
+        # Apply mask, if needed.
+        if mask is not None:
+            fully_masked_queries = mask.all(axis=-1)
+            if np.any(fully_masked_queries):
+                print("Warning: fully masked queries detected at indices:", np.where(fully_masked_queries))
+                raise Exception
+            scores = np.where(mask, -np.inf, scores)
+        # Subtract the max before taking softmax (for numerical stability). Softmax is shift invariant.
+        scores -= np.max(scores, axis=-1, keepdims=True)
+        # Apply softmax.
+        exp_scores = np.exp(scores)
+        attention_weights = (
+                exp_scores / (1e-9 + np.sum(exp_scores, axis=-1, keepdims=True))
+        )  # (bs,nh,sl,sl)x(bs,nh,sl,1)=(bs,nh,sl,sl)
+        # Multiply values by scores.
+        output = attention_weights @ V  # (bs,nh,sl,sl) x (bs,nh,sl,dk) = (bs,nh,sl,dk)
 
-    return output, attention_weights
+        return output, attention_weights
 
+    @staticmethod
+    def scaled_dot_product_attention_backward(
+            *,
+            queries: np.ndarray,
+            keys: np.ndarray,
+            values: np.ndarray,
+            attn_weights: np.ndarray,
+            dout: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Backpropagates the gradient through the scaled dot-product attention.
+        All input matrices are computed during the forward pass and have dtype=float32.
+        Args:
+            queries: (bs, nh, sl_q, dk) queries matrix Q.
+            keys:    (bs, nh, sl_k, dk) keys matrix K.
+            values:  (bs, nh, sl_v, dk) values matrix V.
+            attn_weights: (bs, nh, sl_q, sl_k) self-attention weights.
+            dout:    (bs, nh, sl_q, dk) gradient of the loss w.r.t. the output of the scaled dot-product attention.
 
-def scaled_dot_product_attention_backward(
-        *,
-        queries: np.ndarray,
-        keys: np.ndarray,
-        values: np.ndarray,
-        attn_weights: np.ndarray,
-        dout: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Backpropagates the gradient through the scaled dot-product attention.
-    All input matrices are computed during the forward pass and have dtype=float32.
-    Args:
-        queries: (bs, nh, sl_q, dk) queries matrix Q.
-        keys:    (bs, nh, sl_k, dk) keys matrix K.
-        values:  (bs, nh, sl_v, dk) values matrix V.
-        attn_weights: (bs, nh, sl_q, sl_k) self-attention weights.
-        dout:    (bs, nh, sl_q, dk) gradient of the loss w.r.t. the output of the scaled dot-product attention.
+        Returns:
+            grad_Q: (bs, nh, sl_q, dk)
+            grad_K: (bs, nh, sl_k, dk)
+            grad_V: (bs, nh, sl_v, dk)
+        """
+        Q, K, V = queries, keys, values
+        dk = Q.shape[-1]
+        scale = 1. / np.sqrt(dk)
+        # Backpropagate through final score-value multiplication.
+        grad_attn_weights = dout @ V.transpose((0, 1, 3, 2))  # (bs,nh,sl_q,dk) x (bs,nh,dk,sl_v) = (bs,nh,sl_q,sl_v)
+        grad_V = attn_weights.transpose((0, 1, 3, 2)) @ dout  # (bs,nh,sl_k, sl_q) x (bs,nh,sl_q,dk) = (bs,nh,sl_k,dk)
+        # Backpropagate through the softmax + scaling.
+        weighted_grad_sum = np.sum(grad_attn_weights * attn_weights, axis=-1, keepdims=True)  # (bs,nh,sl_q,1)
+        grad_scores = attn_weights * (grad_attn_weights - weighted_grad_sum)  # (bs,nh,sl_q,sl_k)
+        # Backpropagate through the scores' computation.
+        grad_Q = grad_scores @ keys * scale  # (bs, nh, sl_q, dk)
+        grad_K = grad_scores.transpose(0, 1, 3, 2) @ queries * scale  # (bs,nh,sl_k,dk)
 
-    Returns:
-        grad_Q: (bs, nh, sl_q, dk)
-        grad_K: (bs, nh, sl_k, dk)
-        grad_V: (bs, nh, sl_v, dk)
-    """
-    Q, K, V = queries, keys, values
-    dk = Q.shape[-1]
-    scale = 1. / np.sqrt(dk)
-    # Backpropagate through final score-value multiplication.
-    grad_attn_weights = dout @ V.transpose((0, 1, 3, 2))  # (bs,nh,sl_q,dk) x (bs,nh,dk,sl_v) = (bs,nh,sl_q,sl_v)
-    grad_V = attn_weights.transpose((0, 1, 3, 2)) @ dout  # (bs,nh,sl_k, sl_q) x (bs,nh,sl_q,dk) = (bs,nh,sl_k,dk)
-    # Backpropagate through the softmax + scaling.
-    weighted_grad_sum = np.sum(grad_attn_weights * attn_weights, axis=-1, keepdims=True)  # (bs,nh,sl_q,1)
-    grad_scores = attn_weights * (grad_attn_weights - weighted_grad_sum)  # (bs,nh,sl_q,sl_k)
-    # Backpropagate through the scores' computation.
-    grad_Q = grad_scores @ keys * scale  # (bs, nh, sl_q, dk)
-    grad_K = grad_scores.transpose(0, 1, 3, 2) @ queries * scale  # (bs,nh,sl_k,dk)
-
-    return grad_Q, grad_K, grad_V
+        return grad_Q, grad_K, grad_V

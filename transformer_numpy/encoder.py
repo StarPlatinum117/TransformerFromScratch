@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Iterator
 from typing import Optional
 
 from attention import MultiHeadAttention
@@ -9,7 +10,7 @@ class TransformerEncoder:
     def __init__(
             self, *,
             vocab_size: int,
-            num_layers:int,
+            num_layers: int,
             num_heads: int,
             d_model: int,
             d_ff: int,
@@ -28,7 +29,11 @@ class TransformerEncoder:
         Returns:
             output: (batch_size, src_seq_len, d_model) encoder stack embeddings, dtype=float32.
         """
+        # Cache input x for backward pass.
+        self.input_x = x
+        # Convert token indices to embeddings.
         embedded = self.token_embedding[x] * np.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
+        # Apply positional encodings.
         output = self.pos_encoding(embedded)
         for encoder in self.encoders:
             output = encoder(output, mask)
@@ -40,8 +45,31 @@ class TransformerEncoder:
             dout: (batch_size, src_seq_len, d_model) gradient of the loss w.r.t. the output of the encoder stack,
                   dtype=float32.
         """
+        batch_size, seq_len, _ = dout.shape
+        # Backpropagate through encoder blocks.
+        grad_input = dout
         for encoder in reversed(self.encoders):
-            dout = encoder.backward(dout)
+            grad_input = encoder.backward(grad_input)
+        # No backpropagation needed for positional encoding since it is fixed (sinusoidal), not learnable.
+        # Backpropagate through token embeddings.
+        self.grad_token_embeddings = np.zeros_like(self.token_embedding, dtype=np.float32)
+        for b in range(batch_size):
+            for t in range(seq_len):
+                idx = self.input_x[b, t]  # token index for batch b, position t
+                self.grad_token_embeddings[idx] += grad_input[b, t]  # accumulate gradient for this token index
+
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns the parameters and gradients of the Transformer Encoder for optimization.
+        Returns:
+            Iterator of tuples (parameter, gradient) for each learnable parameter in the Transformer encoder.
+        Notes:
+            Parameters and gradients of positional encodings are not yielded. They are fixed in this implementation.
+        """
+        # Yield parameters of each encoder block.
+        for encoder in self.encoders:
+            yield from encoder.get_parameters_and_gradients()
+        # Yield token embeddings and their gradients.
+        yield self.token_embedding, self.grad_token_embeddings
 
 
 class EncoderBlock:
@@ -114,3 +142,16 @@ class EncoderBlock:
         # Combine residual paths into the final input gradient.
         grad_input = grad_input_direct + grad_input_attn
         return grad_input
+
+    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Returns the parameters and gradients of the Encoder block for optimization.
+        Returns:
+            Iterator of tuples (parameter, gradient) for each learnable parameter in the Encoder block.
+        """
+        # Yield parameters and gradients of multi-head attention.
+        yield from self.multihead_attention.get_parameters_and_gradients()
+        # Yield parameters and gradients of feed-forward layer.
+        yield from self.ff.get_parameters_and_gradients()
+        # Yield parameters and gradients of layer norms.
+        for layer in [self.layernorm1, self.layernorm2]:
+            yield layer.get_parameters_and_gradients()
