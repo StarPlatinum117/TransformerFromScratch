@@ -69,7 +69,7 @@ class TransformerDecoder:
         return probs
 
     def backward(self, dout: np.ndarray) -> np.ndarray:
-        """Backpropagates the gradient through the final linear projection layer and the decoder stack.
+        """Backpropagates the gradient through the final linear projection layer and the Decoder stack.
         Args:
             dout: (batch_size, tgt_seq_len, vocab_size) gradient of loss w.r.t. logits, dtype=float32
         Returns:
@@ -165,7 +165,7 @@ class DecoderBlock:
         return output
 
     def backward(self, dout: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Backpropagates the gradient through the Transformer Decoder block.
+        """Backpropagates the gradient through the Decoder block.
 
         Args:
             dout: (batch_size, tgt_seq_len, d_model) gradient of loss w.r.t. decoder stack's output, dtype=float32.

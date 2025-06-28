@@ -34,6 +34,15 @@ class TransformerEncoder:
             output = encoder(output, mask)
         return output
 
+    def backward(self, dout: np.ndarray) -> None:
+        """Backpropagates the gradient through the Encoder stack.
+        Args:
+            dout: (batch_size, src_seq_len, d_model) gradient of the loss w.r.t. the output of the encoder stack,
+                  dtype=float32.
+        """
+        for encoder in reversed(self.encoders):
+            dout = encoder.backward(dout)
+
 
 class EncoderBlock:
     def __init__(self, num_heads: int, d_model: int, d_ff: int):
@@ -58,11 +67,50 @@ class EncoderBlock:
             output: (batch_size, src_seq_len, d_model) encoded embeddings, dtype=float32.
         """
         # Apply multi-head attention.
-        output = self.multihead_attention.self_attention(input_embeddings=x, mask=mask)
+        attn_output = self.multihead_attention.self_attention(input_embeddings=x, mask=mask)
         # Add residual and normalize.
-        output = self.layernorm1(output + x)
+        res1 = attn_output + x
+        out1 = self.layernorm1(res1)
         # Apply feed-forward layer.
-        hidden = self.ff(output)
+        hidden = self.ff(out1)
         # Add residual and normalize.
-        output = self.layernorm2(hidden + output)
+        res2 = hidden + out1
+        output = self.layernorm2(res2)
+
+        # Store everything needed for the backward pass.
+        self.input_x, self.res1, self.res2 = x, res1, res2
+        self.attn_output, self.hidden = attn_output, hidden
+
         return output
+
+    def backward(self, dout: np.ndarray) -> np.ndarray:
+        """Backpropagates the gradient through the Encoder block.
+        Unless otherwise specified, all the tensors have dtype = float32.
+        Args:
+            dout: (batch_size, src_seq_len, d_model) gradient of the loss w.r.t. the output of the Encoder block.
+        Returns:
+            grad_input: (batch_size, src_seq_len, d_model) gradient of the loss w.r.t. the input of the Encoder block.
+        Notes:
+            The gradient variable names follow the forward pass:
+                - attn_output                        → grad_attn_output
+                - res1 = attn_output + x             → grad_res1
+                - out1 = layernorm1(res1)            → grad_out1
+                - hidden = ff(out1)                  → grad_hidden
+                - res2 = hidden + out1               → grad_res2
+        """
+        # Backpropagate through LayerNorm2 and residual addition res2 = hidden + out1.
+        grad_res2 = self.layernorm2.backward(dout)
+        grad_hidden = grad_res2
+        grad_out1 = grad_res2
+        # Backpropagate through Feed-Forward layer.
+        grad_ff_out1 = self.ff.backward(grad_hidden)
+        grad_out1 += grad_ff_out1
+        # Backpropagate through LayerNorm1 and residual addition res1 = attn_output + x.
+        grad_res1 = self.layernorm1.backward(grad_out1)
+        grad_self_attn = grad_res1
+        grad_input_direct = grad_res1
+        # Backpropagate through Multi-Head Attention.
+        grad_input_attn = self.multihead_attention.backward(grad_self_attn, self_attention=True)
+        # Combine residual paths into the final input gradient.
+        grad_input = grad_input_direct + grad_input_attn
+        return grad_input
