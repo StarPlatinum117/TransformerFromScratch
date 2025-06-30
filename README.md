@@ -51,7 +51,7 @@ python train.py
 Make sure all modules (e.g., model.py, layers.py, tokenizer.py) are in the same directory or properly imported.
 
 📂 Structure
-.
+transformer_numpy
 ├── attention.py
 
 ├── decoder.py
