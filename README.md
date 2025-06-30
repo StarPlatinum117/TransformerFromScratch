@@ -53,15 +53,25 @@ Make sure all modules (e.g., model.py, layers.py, tokenizer.py) are in the same 
 📂 Structure
 .
 ├── attention.py
+
 ├── decoder.py
+
 ├── encoder.py
+
 ├── inference.py
+
 ├── init.py
+
 ├── layers.py
+
 ├── tokenizer.py
+
 ├── train.py
+
 ├── transformer.py
+
 ├── utils.py
+
 └── README.md
 
 📚 Learnings
