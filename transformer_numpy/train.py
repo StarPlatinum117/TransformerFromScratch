@@ -18,10 +18,10 @@ model = Transformer(
     d_model=32,
     d_ff=64,
 )
-n_epochs = 20
-learning_rate = 0.01
+n_epochs = 1000
+learning_rate = 0.001
 from_logits = True
-data, tokenizer = get_identity_dataset()
+data, tokenizer = get_identity_dataset(trivial=False)  # trivial dataset for testing
 # =====================================================================================================================
 losses = []
 # Training loop.
@@ -47,15 +47,16 @@ for epoch in range(n_epochs):
         # Accumulate batch losses.
         epoch_loss += loss
         # Zero gradients
-        for param, grad in model.get_parameters_and_gradients():
-            grad[...] = 0  # in-place zeroing
+        if epoch != 0:
+            for _, param, grad in model.get_parameters_and_gradients():
+                grad[...] = 0  # in-place zeroing
         # Back-propagation.
         model.backward(dout=grad_logits)
         # Optimizer step.
-        for param, grad in model.get_parameters_and_gradients():
+        for name, param, grad in model.get_parameters_and_gradients():
             param -= learning_rate * grad
     # Intermediate output logging for sanity check.
-    if epoch % 5 == 0:
+    if epoch % 10 == 0:
         decoded = np.argmax(predictions[0], axis=-1)
         logging.info(f"Input: {src}")
         logging.info(f"Prediction: {decoded.tolist()}")

@@ -156,14 +156,14 @@ class MultiHeadAttention:
         grad_input = grad_input.reshape((bs, sl, dm))
         return grad_input
 
-    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    def get_parameters_and_gradients(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
         """Returns learnable parameters and their gradients for the optimizer step."""
-        return iter([
-            (self.W_q, self.grad_W_q),
-            (self.W_k, self.grad_W_k),
-            (self.W_v, self.grad_W_v),
-            (self.Wo, self.grad_Wo),
-        ])
+        layer_name = "multihead_attention_"
+        yield layer_name + "Wq", self.W_q, self.grad_W_q
+        yield layer_name + "Wk", self.W_k, self.grad_W_k
+        yield layer_name + "Wv", self.W_v, self.grad_W_v
+        yield layer_name + "Wo", self.Wo, self.grad_Wo
+
 
     @staticmethod
     def scaled_dot_product_attention(

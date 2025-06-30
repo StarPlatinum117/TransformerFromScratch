@@ -66,7 +66,7 @@ class Transformer:
         # Then through encoder.
         self.encoder.backward(dout=grad_decoder)
 
-    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    def get_parameters_and_gradients(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
         """Returns the parameters and gradients of the Transformer model for optimization.
         Returns:
             generator yielding tuples of (parameter, gradient) for each parameter in the model.

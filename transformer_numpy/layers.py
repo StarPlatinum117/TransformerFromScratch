@@ -58,14 +58,13 @@ class FeedForward:
         grad_input = grad_hidden @ self.W1.T  # (bs, sl, dm)
         return grad_input
 
-    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    def get_parameters_and_gradients(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
         """Returns learnable parameters and their gradients for the optimizer step."""
-        return iter([
-            (self.W1, self.grad_W1),
-            (self.b1, self.grad_b1),
-            (self.W2, self.grad_W2),
-            (self.b2, self.grad_b2),
-        ])
+        layer_name = "feedforward_"
+        yield layer_name + "W1", self.W1, self.grad_W1
+        yield layer_name + "b1", self.b1, self.grad_b1
+        yield layer_name + "W2", self.W2, self.grad_W2
+        yield layer_name + "b2", self.b2, self.grad_b2
 
 
 class LayerNorm:
@@ -100,12 +99,12 @@ class LayerNorm:
 
         Notes:
             This method also computes and stores the following gradients for the optimizer step:
-                - grad_gamma: ∂L/∂γ, shape (1, 1, d_model)
-                - grad_beta: ∂L/∂β, shape (1, 1, d_model)
+                - grad_gamma: ∂L/∂γ, shape (d_model,)
+                - grad_beta: ∂L/∂β, shape (d_model,)
         """
         batch_size, seq_len, d_model = dout.shape
-        self.grad_gamma = np.sum(dout * self.x_hat, axis=(0, 1), keepdims=True)  # (1, 1, dm)
-        self.grad_beta = np.sum(dout, axis=(0, 1), keepdims=True)  # (1, 1, dm)
+        self.grad_gamma = np.sum(dout * self.x_hat, axis=(0, 1))  # (dm,)
+        self.grad_beta = np.sum(dout, axis=(0, 1))  # (dm,)
         # Backpropagate into x.
         dx_hat = dout * self.gamma  # (bs, sl, dm)
         sum_dxhat = np.sum(dx_hat, axis=-1, keepdims=True)  # (bs, sl, 1)
@@ -117,12 +116,11 @@ class LayerNorm:
         )
         return grad_input
 
-    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    def get_parameters_and_gradients(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
         """Returns learnable parameters and their gradients for the optimizer step."""
-        return iter([
-            (self.gamma, self.grad_gamma),
-            (self.beta, self.grad_beta),
-        ])
+        layer_name = "layernorm_"
+        yield layer_name + "gamma", self.gamma, self.grad_gamma
+        yield layer_name + "beta", self.beta, self.grad_beta
 
 
 class PositionalEncoding:

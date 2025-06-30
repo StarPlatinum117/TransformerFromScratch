@@ -40,19 +40,22 @@ class SimpleTokenizer:
         return len(self.word2id)
 
 
-def get_identity_dataset():
+def get_identity_dataset(trivial: bool = False) -> tuple[list[tuple[list[int], list[int]]], SimpleTokenizer]:
     # Define tiny corpus.
     samples = [
         "hello world",
         "how are you",
         "why are we still here?",
         "just to suffer?",
-        "you will try!"
+        "I will do what I must..."
+        "You will try!"
     ]
     tokenizer = SimpleTokenizer()
     tokenizer.build_vocab(samples)
 
     # Encode pairs (input, target) = (sentence, sentence).
     data = [(tokenizer.encode(s), tokenizer.encode(s)) for s in samples]
+    if trivial:
+        data = [data[0]]  # to test trivial overfitting case
 
     return data, tokenizer

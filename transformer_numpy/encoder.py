@@ -52,13 +52,13 @@ class TransformerEncoder:
             grad_input = encoder.backward(grad_input)
         # No backpropagation needed for positional encoding since it is fixed (sinusoidal), not learnable.
         # Backpropagate through token embeddings.
-        self.grad_token_embeddings = np.zeros_like(self.token_embedding, dtype=np.float32)
+        self.grad_token_embedding = np.zeros_like(self.token_embedding, dtype=np.float32)
         for b in range(batch_size):
             for t in range(seq_len):
                 idx = self.input_x[b, t]  # token index for batch b, position t
-                self.grad_token_embeddings[idx] += grad_input[b, t]  # accumulate gradient for this token index
+                self.grad_token_embedding[idx] += grad_input[b, t]  # accumulate gradient for this token index
 
-    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    def get_parameters_and_gradients(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
         """Returns the parameters and gradients of the Transformer Encoder for optimization.
         Returns:
             Iterator of tuples (parameter, gradient) for each learnable parameter in the Transformer encoder.
@@ -69,7 +69,7 @@ class TransformerEncoder:
         for encoder in self.encoders:
             yield from encoder.get_parameters_and_gradients()
         # Yield token embeddings and their gradients.
-        yield self.token_embedding, self.grad_token_embeddings
+        yield "encoder_token_embedding", self.token_embedding, self.grad_token_embedding
 
 
 class EncoderBlock:
@@ -143,7 +143,7 @@ class EncoderBlock:
         grad_input = grad_input_direct + grad_input_attn
         return grad_input
 
-    def get_parameters_and_gradients(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    def get_parameters_and_gradients(self) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
         """Returns the parameters and gradients of the Encoder block for optimization.
         Returns:
             Iterator of tuples (parameter, gradient) for each learnable parameter in the Encoder block.
@@ -154,4 +154,4 @@ class EncoderBlock:
         yield from self.ff.get_parameters_and_gradients()
         # Yield parameters and gradients of layer norms.
         for layer in [self.layernorm1, self.layernorm2]:
-            yield layer.get_parameters_and_gradients()
+            yield from layer.get_parameters_and_gradients()
