@@ -27,22 +27,22 @@ Each sample is encoded with a custom tokenizer, with support for special tokens 
 
 🏗️ Components Implemented
 
--Token embedding layer
--Positional encoding
--Multi-head self-attention
--Feed-forward network
--Layer normalization
--Transformer Encoder/Decoder
--Full backpropagation
--Gradient descent optimizer
+- Token embedding layer
+- Positional encoding
+- Multi-head self-attention
+- Feed-forward network
+- Layer normalization
+- Transformer Encoder/Decoder
+- Full backpropagation
+- Gradient descent optimizer
 
 🔁 Training Loop
 
 The training loop includes:
--Forward pass
--Cross-entropy loss computation
--Manual gradient computation (backward pass)
--Parameter update via SGD
+- Forward pass
+- Cross-entropy loss computation
+- Manual gradient computation (backward pass)
+- Parameter update via SGD
 
 Logging is enabled to track loss and predictions at intervals.
 
