@@ -101,3 +101,6 @@ How attention mechanisms distribute focus across tokens.
 How to derive gradients for complex architectures by hand.
 
 Deep understanding of Transformer internals and training dynamics.
+
+**Useful links:**
+- https://jalammar.github.io/illustrated-transformer/
