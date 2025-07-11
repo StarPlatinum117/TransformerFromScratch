@@ -1,8 +1,6 @@
 Transformer from Scratch
 This project implements a mini Transformer architecture from scratch using:
 - NumPy only — no deep learning frameworks involved.
-- PyTorch only (to be implemented).
-- TensorFlow only (to be implemented).
 It includes both the forward and backward passes, and is capable of learning simple sequence-to-sequence tasks using teacher forcing and cross-entropy loss.
 
 🧠 Project Goals
